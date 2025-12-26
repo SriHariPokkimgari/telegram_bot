@@ -24,7 +24,8 @@ async function updateSchema() {
         ADD COLUMN IF NOT EXISTS current_bowler VARCHAR(100),
         ADD COLUMN IF NOT EXISTS team_a VARCHAR(100) DEFAULT 'Team A',
         ADD COLUMN IF NOT EXISTS team_b VARCHAR(100) DEFAULT 'Team B',
-        ADD COLUMN IF NOT EXISTS target_score INTEGER DEFAULT 0; 
+        ADD COLUMN IF NOT EXISTS target_score INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP; 
     `);
     console.log("✅ Updated matches table");
 

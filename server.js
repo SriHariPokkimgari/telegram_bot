@@ -34,10 +34,10 @@ async function updateUserCoins(userId, amountChange) {
     await db.query(
       `
       UPDATE users 
-      SET coins = $1
-      WHERE user_id = $2  
+      SET coins = (SELECT coins FROM users WHERE user_id = $1) + $2
+      WHERE user_id = $3  
     `,
-      [amountChange, userId]
+      [userId, amountChange, userId]
     );
 
     const newCoins = await getUserCoins(userId);
@@ -178,7 +178,7 @@ async function initializeBot() {
       // Store user session
       activeSessions.set(userId, {
         matchId: activeMatch.match_id,
-        betAmmount: 10, //Default bet
+        betAmount: 10, //Default bet
         lastPrediction: null,
       });
 
@@ -230,7 +230,8 @@ Place your prediction for the next ball!`,
     }
 
     const userCoins = await getUserCoins(userId);
-    if (userCoins < session.betAmmount) {
+
+    if (userCoins < session.betAmount) {
       await ctx.answerCbQuery(
         `Not enough coins! Need ${session.betAmount}, have ${userCoins}`
       );
@@ -243,7 +244,7 @@ Place your prediction for the next ball!`,
     const predictionData = gameLogic.predictionTypes[predictionType];
 
     await ctx.answerCbQuery(
-      `Selected: ${predictionData.label} (Bet: ${session.betAmmount} coins)`
+      `Selected: ${predictionData.label} (Bet: ${session.betAmount} coins)`
     );
 
     // Show confirmation
@@ -266,7 +267,7 @@ Waiting for ball result...`,
   // Handle bet amount selection
   bot.action(/bet_(\d+)/, async (ctx) => {
     const userId = ctx.from.id;
-    const betAmmount = parseInt(ctx.match[1]);
+    const betAmount = parseInt(ctx.match[1]);
 
     const session = activeSessions.get(userId);
     if (!session) {
@@ -274,9 +275,9 @@ Waiting for ball result...`,
       return;
     }
 
-    session.betAmmount = betAmmount;
+    session.betAmount = betAmount;
 
-    await ctx.answerCbQuery(`Bet amount set to ${betAmmount} coins`);
+    await ctx.answerCbQuery(`Bet amount set to ${betAmount} coins`);
 
     // Update message
     await ctx.editMessageText(
@@ -308,17 +309,18 @@ Select your prediction:`,
   bot.action("simulate_ball", async (ctx) => {
     const userId = ctx.from.id;
     const session = activeSessions.get(userId);
-    console.log(activeSessions);
+
     if (!session || !session.lastPrediction) {
       await ctx.answerCbQuery("Please make a prediction first");
       return;
     }
 
     // Deduct bet amount
-    const newCoins = await updateUserCoins(userId, -session.betAmmount);
+    await updateUserCoins(userId, -session.betAmount);
 
     // Generate ball outcome
     const outcome = gameLogic.generateBallOutcome();
+
     const isWinner = gameLogic.checkPrediction(session.lastPrediction, outcome);
 
     // Calulate winnings
@@ -328,12 +330,29 @@ Select your prediction:`,
     if (isWinner) {
       winnings = gameLogic.calculateWinnings(
         session.lastPrediction,
-        session.betAmmount
+        session.betAmount
       );
-      await updateUserCoins(userId, winnings);
+      await updateUserCoins(userId, winnings + session.betAmount);
       resultMessage = `🎉 YOU WON! +${winnings} coins`;
+      // Update total_wins
+      await db.query(
+        `
+        UPDATE users
+        SET total_wins = total_wins+1
+        WHERE user_id = $1;   
+      `,
+        [userId]
+      );
     } else {
       resultMessage = "❌ You lost this round";
+      await db.query(
+        `
+        UPDATE users
+        SET total_wins = total_losses+1
+        WHERE user_id = $1;   
+      `,
+        [userId]
+      );
     }
 
     // Update match ball in database
@@ -346,7 +365,7 @@ Select your prediction:`,
     try {
       await db.query(
         `INSERT INTO predictions (user_id, match_id, ball_number, prediction_type, actual_result, coins_bet, coins_won, is_winner )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       `,
         [
           userId,
@@ -354,7 +373,7 @@ Select your prediction:`,
           await gameLogic.getNextBallNumber(activeMatch?.match_id || 1),
           session.lastPrediction,
           outcome.type === "wicket" ? "WICKET" : `${outcome.value} runs`,
-          session.betAmmount,
+          session.betAmount,
           winnings,
           isWinner,
         ]
@@ -375,10 +394,10 @@ Select your prediction:`,
 ${resultMessage}
 💰 Bet: ${session.betAmount} coins
 ${isWinner ? `💰 Won: ${winnings} coins` : ""}
-💰 New balance: ${newCoins + winnings} coins
+💰 New balance: ${await getUserCoins(userId)} coins
 
 ${
-  newCoins + winnings < 10
+  (await getUserCoins(userId)) < 10
     ? "⚠️ Low coins! Need at least 10 to play."
     : "Ready for next prediction!"
 }`,
@@ -438,11 +457,10 @@ Place your prediction for the next ball!`,
 
   bot.action("view_history", async (ctx) => {
     const userId = ctx.from.id;
-
     try {
       const history = await db.query(
-        `SELECT prediction_type, actual_result, coins_bet, coins_win, created_at
-        FROM prediction 
+        `SELECT prediction_type, actual_result, coins_bet, coins_won, is_winner, created_at
+        FROM predictions 
         WHERE user_id = $1
         ORDER BY created_at DESC
         LIMIT 5`,
@@ -477,7 +495,7 @@ Place your prediction for the next ball!`,
       const stats = await db.query(
         `SELECT 
           COUNT(*) as total,
-          SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as wins
+          SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as wins,
           SUM(coins_won) as total_won
           FROM predictions
           WHERE user_id = $1`,
@@ -574,7 +592,6 @@ Place your prediction for the next ball!`,
 
   bot.command("history", async (ctx) => {
     await ctx.reply("Opening your prediction history...");
-
     // Trigger history view
     const fakeUpdate = {
       ...ctx.update,

@@ -44,7 +44,7 @@ class GameLogic {
 
   // Get random ball outcome based on cricket probabilities
   generateBallOutcome() {
-    const random = Math.round();
+    const random = Math.random();
     let outcome;
 
     if (random < 0.1) outcome = "wicket";
@@ -60,12 +60,12 @@ class GameLogic {
     } else if (outcome === "dot_ball") {
       return { type: "runs", value: 0 };
     } else {
-      const type = outcome.split("_")[1]; // 'runs' or 'wickets'
+      const type = outcome.split("_")[1] || outcome.split("_")[0]; // 'runs' or 'wickets'
       const value = outcome.split("_")[0]; // 2, 4, 6, or 'wicket'
 
       return {
         type: type,
-        value: type === "wicket" ? "WICKET" : parseInt(value),
+        value: type === "wicket" ? "wicket" : parseInt(value),
       };
     }
   }
@@ -83,7 +83,7 @@ class GameLogic {
 
     // For run predictions
     if (predictionType.includes("_runs")) {
-      const expectedRuns = parseInt(predictionType.slipt("_")[0]);
+      const expectedRuns = parseInt(predictionType.split("_")[0]);
       return (
         actualOutcome.type === "runs" && actualOutcome.value === expectedRuns
       );
@@ -175,7 +175,7 @@ class GameLogic {
                 team_a_score = $3,
                 wickets = $4,
                 last_updated = CURRENT_TIMESTAMP
-            WHERE match_id = $5,    
+            WHERE match_id = $5;    
         `,
         [current_over, current_ball, newScore, newWickets, matchId]
       );

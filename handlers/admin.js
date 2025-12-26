@@ -28,4 +28,4 @@ async function startNewMatch() {
   }
 }
 
-startNewMatch();
+export default startNewMatch();
