@@ -1,14 +1,15 @@
 import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
 import db from "./services/db.js";
-import gameLogic from "./services/gameLogic.js";
-
+import LiveDashboard from "./handlers/live-dashboard.js";
 dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_API_KEY);
+const liveDashboard = new LiveDashboard(bot);
 
 // Store active game sessions in memory (for demo)
 const activeSessions = new Map(); // user_id -> {match_id, betAmount, lastPrediction}
+const userDashboard = new Map();
 
 // ===== Helper functions =====
 
@@ -16,8 +17,8 @@ async function getUserCoins(userId) {
   try {
     const result = await db.query(
       `
-      SELECT coins FROM users 
-      WHERE user_id = $1  
+      SELECT coins FROM users
+      WHERE user_id = $1
     `,
       [userId]
     );
@@ -33,17 +34,17 @@ async function updateUserCoins(userId, amountChange) {
   try {
     await db.query(
       `
-      UPDATE users 
-      SET coins = (SELECT coins FROM users WHERE user_id = $1) + $2
-      WHERE user_id = $3  
+      UPDATE users
+      SET coins = coins + $1
+      WHERE user_id = $2
     `,
-      [userId, amountChange, userId]
+      [amountChange, userId]
     );
 
     const newCoins = await getUserCoins(userId);
     return newCoins;
   } catch (error) {
-    console.error(`Error updating coins: ${error}`);
+    console.error(`Error updating coins at "server": ${error}`);
     return 0;
   }
 }
@@ -51,22 +52,22 @@ async function updateUserCoins(userId, amountChange) {
 async function getActiveMatch() {
   try {
     const result = await db.query(`
-      SELECT * FROM matches 
-      WHERE status = 'live' 
+      SELECT * FROM matches
+      WHERE status = 'live'
       ORDER BY match_id DESC
-      LIMIT 1  
+      LIMIT 1
     `);
     return result.rows.length > 0 ? result.rows[0] : null;
   } catch (error) {
-    console.error(`Error getting active matches : ${error}`);
+    console.error(`Error getting active matches at "server" : ${error}`);
+    return null;
   }
 }
 
-// ===== BOT COMMANDS =====
+// ========== INITIALIZE BOT ==========
 
-// Initialize bot
 async function initializeBot() {
-  console.log(`Starting cricket pridiction Bot...`);
+  console.log("🤖 Starting Cricket Prediction Bot with Live Dashboard...");
 
   const isConnected = await db.testConnection();
 
@@ -77,19 +78,20 @@ async function initializeBot() {
 
   console.log("✅ Database connected successfully");
 
-  // Start command
+  // ===== Start command =====
   bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const userName = ctx.from.username || "no username";
     const firstName = ctx.from.first_name;
     const lastName = ctx.from.last_name || "";
+    const chatId = ctx.chat.id;
 
     try {
       // Check if user exists
       const userResults = await db.query(
         `
-        SELECT * FROM users WHERE user_id = $1
-      `,
+          SELECT * FROM users WHERE user_id = $1
+        `,
         [userId]
       );
 
@@ -97,9 +99,9 @@ async function initializeBot() {
         //Register new user
         await db.query(
           `
-          INSERT INTO users (user_id, username, first_name, last_name, coins)
-          VALUES ($1, $2, $3, $4, $5);  
-        `,
+            INSERT INTO users (user_id, username, first_name, last_name, coins)
+            VALUES ($1, $2, $3, $4, $5);
+          `,
           [
             userId,
             userName,
@@ -109,41 +111,232 @@ async function initializeBot() {
           ]
         );
 
-        await ctx.reply(`🏏 Welcome to Cricket Prediction Game, ${firstName}!
-        
-        🎉 You've been registered!
-        💰 Starting coins: ${process.env.INITIAL_COINS || 1000}
+        await liveDashboard.sendNotification(
+          userId,
+          "welcome",
+          `Welcom ${firstName}! You received ${
+            process.env.INITIAL_COINS || 1000
+          } starting coins.`
+        );
 
-        Click /join to start playing!`);
+        // 🎉 You've been registered!
+        // 💰 Starting coins: ${process.env.INITIAL_COINS || 1000}
+
+        // Click /join to start playing!`);
       } else {
         // Update last active
         await db.query(
           `
-          UPDATE users SET last_active = CURRENT_TIMESTAMP
-          WHERE user_id = $1  
-        `,
+            UPDATE users SET last_active = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+          `,
           [userId]
         );
-
-        const user = userResults.rows[0];
-        await ctx.reply(`👋 Welcome back, ${firstName}!
-
-          💰 Your coins: ${user.coins}
-          📅 Joined: ${new Date(user.join_date).toLocaleDateString()}
-
-          Click /join to start playing!`);
       }
 
-      // Show join button
-      ctx.reply(
-        `Ready to play?`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback("🎮 JOIN MATCH", "join_match")],
-        ])
+      // Send welcome message
+      await ctx.reply(
+        `🏏 *Welcome to Cricket Prediction Game!*
+
+  🎮 *Real-time cricket predictions*
+  💰 *Virtual coins, real excitement*
+  📊 *Live dashboard updates*
+  🔔 *Instant notifications*
+
+  *Ready to experience live cricket action?*`,
+        { parse_mode: "Markdown" }
       );
+
+      // Show main menu
+      await showMainMenu(ctx);
     } catch (error) {
       console.error(`Error in /start: ${error}`);
       ctx.reply(`Sorry, there was an error. Plese try again.`);
+    }
+  });
+
+  // ===== Live dashboard command =====
+  bot.command("live", async (ctx) => {
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+
+    try {
+      const activeMatch = await getActiveMatch();
+
+      if (!activeMatch) {
+        await ctx.reply(
+          "No live match at the moment. A match will start soon!\n\nUse /startmatch as admin to begin.",
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🔄 Check Again", "check_match_status")],
+            [Markup.button.callback("🏠 Main Menu", "main_menu")],
+          ])
+        );
+        return;
+      }
+
+      // Subscribe to live update
+      await liveDashboard.subscribeToMatch(
+        userId,
+        chatId,
+        activeMatch.match_id
+      );
+
+      // Send live dashboard
+      await liveDashboard.sendLiveDashboard(
+        userId,
+        chatId,
+        activeMatch.match_id
+      );
+    } catch (error) {
+      console.error("Error in /live:", error);
+      ctx.reply("Error loading live dashboard. Please try again.");
+    }
+  });
+
+  // ===== Private dashboard command =====
+  bot.command("dashboard", async (ctx) => {
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+
+    try {
+      await liveDashboard.sendPrivateDashboard(userId, chatId);
+    } catch (error) {
+      console.error("Error in /dashboard:", error);
+      ctx.reply("Error loading private dashboard.");
+    }
+  });
+
+  // ===== Join match with live updates =====
+  bot.action("join_live_match", async (ctx) => {
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+
+    try {
+      const userCoins = await getUserCoins(userId);
+
+      if (userCoins < 10) {
+        await ctx.reply(
+          `❌ *INSUFFICIENT COINS*
+
+  You need at least *10 coins* to join a match.
+  Current balance: *${userCoins} coins*
+
+  *Options:*
+  1. Wait for daily bonus
+  2. Contact admin for coins
+  3. Watch match without playing`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [Markup.button.callback("👀 Watch Match Only", "watch_only")],
+                [Markup.button.callback("💰 Check Balance", "check_balance")],
+                [Markup.button.callback("🏠 Main Menu", "main_menu")],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      const activeMatch = await getActiveMatch();
+
+      if (!activeMatch) {
+        await ctx.editMessageText(
+          `⏳ *NO ACTIVE MATCH*
+
+  There is no live match at the moment.
+  A new match will start soon!
+
+  *What would you like to do?*`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  Markup.button.callback(
+                    "🔄 Check Again",
+                    "check_match_status"
+                  ),
+                ],
+                [
+                  Markup.button.callback(
+                    "📱 Private Dashboard",
+                    "private_dashboard"
+                  ),
+                ],
+                [Markup.button.callback("🏠 Main Menu", "main_menu")],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      // Store user session
+      activeSessions.set(userId, {
+        matchId: activeMatch.match_id,
+        betAmount: 10,
+        lastPrediction: null,
+        joinAt: new Date(),
+      });
+
+      // Subscribe to live updates
+      await liveDashboard.subscribeToMatch(
+        userId,
+        chatId,
+        activeMatch.match_id
+      );
+
+      // Send success message
+      await ctx.editMessageText(
+        `✅ *SUCCESSFULLY JOINED!*
+
+  🎮 *Match:* ${activeMatch.match_name}
+  💰 *Your Coins:* ${userCoins}
+  👥 *Players Online:* Checking...
+
+  *You will receive:*
+  🎯 Live ball-by-ball updates
+  📊 Real-time scoreboard
+  🔔 Prediction results
+  🏆 Leaderboard updates
+
+  *Getting live dashboard ready...*`,
+        { parse_mode: "Markdown" }
+      );
+
+      // Send live dashboard after a delay
+      setTimeout(async () => {
+        await liveDashboard.sendLiveDashboard(
+          userId,
+          chatId,
+          activeMatch.match_id
+        );
+      }, 1000);
+    } catch (error) {
+      console.error("Error joining match:", error);
+      await ctx.answerCbQuery("Error joining match. Please try again.");
+    }
+  });
+
+  // ===== Live dashboard button handlers
+  bot.action("refresh_dashboard", async (ctx) => {
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+
+    try {
+      const session = activeSessions.get(userId);
+      if (!session) {
+        await ctx.answerCbQuery("Please join a match first!");
+        return;
+      }
+
+      await ctx.answerCbQuery("🔄 Refreshing dashboard...");
+      await liveDashboard.sendLiveDashboard(userId, chatId, session.matchId);
+    } catch (error) {
+      console.error("Error refreshing dashboard:", error);
+      await ctx.answerCbQuery("Error refreshing. Please try again.");
     }
   });
 
@@ -156,9 +349,9 @@ async function initializeBot() {
 
       if (userCoins < 10) {
         await ctx.reply(`❌ You need at least 10 coins to play!
-           Current coins: ${userCoins}
+             Current coins: ${userCoins}
 
-           Use /coins to check your balance.`);
+             Use /coins to check your balance.`);
         return;
       }
 
@@ -184,13 +377,13 @@ async function initializeBot() {
 
       await ctx.reply(
         `🎮 JOINED MATCH!
-      
-🏏 Match: ${activeMatch.match_name}
-🎯 Current: Over ${activeMatch.current_over}.${activeMatch.current_ball}
-📊 Score: ${activeMatch.team_a_score}/${activeMatch.wickets}
-💰 Your coins: ${userCoins}
 
-Place your prediction for the next ball!`,
+  🏏 Match: ${activeMatch.match_name}
+  🎯 Current: Over ${activeMatch.current_over}.${activeMatch.current_ball}
+  📊 Score: ${activeMatch.team_a_score}/${activeMatch.wickets}
+  💰 Your coins: ${userCoins}
+
+  Place your prediction for the next ball!`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback("2 Runs (1.5x)", "predict_2_runs"),
@@ -250,13 +443,13 @@ Place your prediction for the next ball!`,
     // Show confirmation
     await ctx.editMessageText(
       `✅ PREDICTION CONFIRMED!
-      
-🎯 You predicted: ${predictionData.label}
-💰 Bet amount: ${session.betAmount} coins
-🎲 Multiplier: ${predictionData.multiplier}x
-💰 Potential win: ${session.betAmount * predictionData.multiplier} coins
 
-Waiting for ball result...`,
+  🎯 You predicted: ${predictionData.label}
+  💰 Bet amount: ${session.betAmount} coins
+  🎲 Multiplier: ${predictionData.multiplier}x
+  💰 Potential win: ${session.betAmount * predictionData.multiplier} coins
+
+  Waiting for ball result...`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🚀 SIMULATE BALL", "simulate_ball")],
         [Markup.button.callback("↩️ Change Prediction", "change_prediction")],
@@ -282,8 +475,8 @@ Waiting for ball result...`,
     // Update message
     await ctx.editMessageText(
       `💰 Bet amount updated: ${betAmount} coins
-      
-Select your prediction:`,
+
+  Select your prediction:`,
       Markup.inlineKeyboard([
         [
           Markup.button.callback("2 Runs (1.5x)", "predict_2_runs"),
@@ -332,25 +525,26 @@ Select your prediction:`,
         session.lastPrediction,
         session.betAmount
       );
+
       await updateUserCoins(userId, winnings + session.betAmount);
       resultMessage = `🎉 YOU WON! +${winnings} coins`;
       // Update total_wins
       await db.query(
         `
-        UPDATE users
-        SET total_wins = total_wins+1
-        WHERE user_id = $1;   
-      `,
+          UPDATE users
+          SET total_wins = total_wins+1
+          WHERE user_id = $1;
+        `,
         [userId]
       );
     } else {
       resultMessage = "❌ You lost this round";
       await db.query(
         `
-        UPDATE users
-        SET total_wins = total_losses+1
-        WHERE user_id = $1;   
-      `,
+          UPDATE users
+          SET total_losses = total_losses+1
+          WHERE user_id = $1;
+        `,
         [userId]
       );
     }
@@ -365,8 +559,8 @@ Select your prediction:`,
     try {
       await db.query(
         `INSERT INTO predictions (user_id, match_id, ball_number, prediction_type, actual_result, coins_bet, coins_won, is_winner )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      `,
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
         [
           userId,
           activeMatch?.match_id || 1,
@@ -390,17 +584,17 @@ Select your prediction:`,
 
     await ctx.editMessageText(
       `🎲 BALL RESULT: ${outcomeText}
-      
-${resultMessage}
-💰 Bet: ${session.betAmount} coins
-${isWinner ? `💰 Won: ${winnings} coins` : ""}
-💰 New balance: ${await getUserCoins(userId)} coins
 
-${
-  (await getUserCoins(userId)) < 10
-    ? "⚠️ Low coins! Need at least 10 to play."
-    : "Ready for next prediction!"
-}`,
+  ${resultMessage}
+  💰 Bet: ${session.betAmount} coins
+  ${isWinner ? `💰 Won: ${winnings} coins` : ""}
+  💰 New balance: ${await getUserCoins(userId)} coins
+
+  ${
+    (await getUserCoins(userId)) < 10
+      ? "⚠️ Low coins! Need at least 10 to play."
+      : "Ready for next prediction!"
+  }`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🎮 PLAY AGAIN", "play_again")],
         [Markup.button.callback("📊 View History", "view_history")],
@@ -421,11 +615,11 @@ ${
     if (userCoins < 10) {
       await ctx.editMessageText(
         `❌ NOT ENOUGH COINS!
-        
-💰 Current balance: ${userCoins}
-🎮 Minimum needed: 10 coins
 
-Contact admin for more coins or wait for daily bonus.`,
+  💰 Current balance: ${userCoins}
+  🎮 Minimum needed: 10 coins
+
+  Contact admin for more coins or wait for daily bonus.`,
         Markup.inlineKeyboard([
           [Markup.button.callback("🔄 Check Balance", "check_balance")],
           [Markup.button.callback("🏠 Main Menu", "main_menu")],
@@ -436,8 +630,8 @@ Contact admin for more coins or wait for daily bonus.`,
 
     await ctx.editMessageText(
       `💰 Your coins: ${userCoins}
-      
-Place your prediction for the next ball!`,
+
+  Place your prediction for the next ball!`,
       Markup.inlineKeyboard([
         [
           Markup.button.callback("2 Runs (1.5x)", "predict_2_runs"),
@@ -460,7 +654,7 @@ Place your prediction for the next ball!`,
     try {
       const history = await db.query(
         `SELECT prediction_type, actual_result, coins_bet, coins_won, is_winner, created_at
-        FROM predictions 
+        FROM predictions
         WHERE user_id = $1
         ORDER BY created_at DESC
         LIMIT 5`,
@@ -493,7 +687,7 @@ Place your prediction for the next ball!`,
 
       // Get stats
       const stats = await db.query(
-        `SELECT 
+        `SELECT
           COUNT(*) as total,
           SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as wins,
           SUM(coins_won) as total_won
@@ -540,9 +734,9 @@ Place your prediction for the next ball!`,
 
     await ctx.editMessageText(
       `🏏 CRICKET PREDICTION GAME
-      
-💰 Your coins: ${userCoins}
-🎮 Ready to play?`,
+
+  💰 Your coins: ${userCoins}
+  🎮 Ready to play?`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🎮 JOIN MATCH", "join_match")],
         [Markup.button.callback("💰 Check Coins", "check_balance")],
@@ -562,20 +756,20 @@ Place your prediction for the next ball!`,
   bot.action("show_help", async (ctx) => {
     await ctx.editMessageText(
       `📚 AVAILABLE COMMANDS:
-      
-/start - Register/Start
-/join - Join current match
-/coins - Check your coins
-/profile - View profile
-/history - Prediction history
-/leaderboard - Top players
-/help - Show this help
 
-🎮 GAME RULES:
-• Min bet: 10 coins
-• Predict ball outcome
-• Win multipliers: 1.5x to 5x
-• No real money involved`,
+  /start - Register/Start
+  /join - Join current match
+  /coins - Check your coins
+  /profile - View profile
+  /history - Prediction history
+  /leaderboard - Top players
+  /help - Show this help
+
+  🎮 GAME RULES:
+  • Min bet: 10 coins
+  • Predict ball outcome
+  • Win multipliers: 1.5x to 5x
+  • No real money involved`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🏠 Main Menu", "main_menu")],
         [Markup.button.callback("🎮 Play Now", "join_match")],
@@ -635,90 +829,6 @@ Place your prediction for the next ball!`,
       ])
     );
   });
-
-  //   // Coins command
-  //   bot.command("coins", async (ctx) => {
-  //     try {
-  //       const result = await db.query(
-  //         `
-  //         SELECT coins FROM users
-  //         WHERE user_id = $1;
-  //       `,
-  //         [ctx.from.id]
-  //       );
-
-  //       if (result.rows.length > 0) {
-  //         ctx.reply(`💰 your current balance: ${result.rows[0].coins} coins`);
-  //       } else {
-  //         ctx.reply(`Please use /start to register first.`);
-  //       }
-  //     } catch (err) {
-  //       console.error(`Error in / coins : ${err}`);
-  //       ctx.reply("Error checking your coins.");
-  //     }
-  //   });
-
-  //   // Profile command
-  //   bot.command("profile", async (ctx) => {
-  //     try {
-  //       const result = await db.query(
-  //         `
-  //         SELECT * FROM users
-  //         WHERE user_id = $1
-  //       `,
-  //         [ctx.from.id]
-  //       );
-
-  //       if (result.rows.length > 0) {
-  //         const user = result.rows[0];
-  //         ctx.reply(`👤 **Your Profile**
-
-  // 🆔 ID: ${user.user_id}
-  // 👤 Name: ${user.first_name} ${user.last_name || ""}
-  // 📛 Username: @${user.username || "Not set"}
-  // 💰 Coins: ${user.coins}
-  // 📅 Joined: ${new Date(user.join_date).toLocaleDateString()}
-  // 🕒 Last Active: ${new Date(user.last_active).toLocaleString()}`);
-  //       } else {
-  //         ctx.reply("Please use /start to register first.");
-  //       }
-  //     } catch (error) {
-  //       console.error("Error in /profile:", error);
-  //       ctx.reply("Error fetching your profile.");
-  //     }
-  //   });
-
-  //   // Help command
-  //   bot.command("help", (ctx) => {
-  //     ctx.reply(`📚 **Cricket Prediction Bot - Commands**
-
-  // 👤 User Commands:
-  // /start - Register/Start game
-  // /coins - Check your coins
-  // /profile - View your profile
-  // /myid - Get your Telegram ID
-
-  // 🎮 Game Commands:
-  // (Coming soon...)
-
-  // 🛠️ Admin Commands:
-  // (Coming soon...)
-
-  // ⚙️ Settings:
-  // /help - Show this message
-
-  // 💰 Starting coins: ${process.env.INITIAL_COINS || 1000}`);
-  //   });
-
-  //   // My ID command
-  //   bot.command("myid", async (ctx) => {
-  //     ctx.reply(
-  //       `Your Telegram ID: \`${ctx.from.id}\`
-
-  // Save this ID for admin features.`,
-  //       { parse_mode: "Markdown" }
-  //     );
-  //   });
 }
 
 // === LAUNCH BOT ===

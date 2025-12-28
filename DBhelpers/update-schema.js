@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ path: "../.env" });
 
 async function updateSchema() {
   console.log("🔄 Updating database schema for game mechanics...");
