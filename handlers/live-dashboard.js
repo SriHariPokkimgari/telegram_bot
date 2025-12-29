@@ -71,7 +71,7 @@ class LiveDashboard {
       // Send or update dashboard
       await this.bot.telegram.sendMessage(chatId, dashboard.message, {
         parse_mode: "Markdown",
-        reply_markup: dashboard.keybord,
+        reply_markup: dashboard.keyboard,
       });
 
       return true;
@@ -87,7 +87,7 @@ class LiveDashboard {
 
     if (!match) return;
 
-    const dashboard = this.createDashboardMessage(matchId);
+    const dashboard = this.createDashboardMessage(match);
 
     // Update each subscriber
     for (const sub of subscribers) {
@@ -114,7 +114,7 @@ class LiveDashboard {
     try {
       // Record event
       await db.query(
-        `INSERT INTO match_events (match_id, ball_number, event_type, event_data)
+        `INSERT INTO match_events (match_id, ball_number, event_type, event_date)
                 VALUES ($1, $2, $3, $4)`,
         [matchId, ballData.ballNumber, "ball-bowled", ballData]
       );
@@ -124,7 +124,7 @@ class LiveDashboard {
         `UPDATE matches
                 SET last_ball_result = $1,
                     total_balls_bowled = total_balls_bowled+1,
-                    last_updated = CURRENT TIMESTAMP
+                    last_updated = CURRENT_TIMESTAMP
                 WHERE match_id = $2
                 `,
         [ballData.result, matchId]
@@ -175,11 +175,10 @@ class LiveDashboard {
   // ========== HELPER METHODS ==========
 
   async getMatchDetails(matchId) {
-    console.log(matchId);
     try {
-      const result = db.query(
+      const result = await db.query(
         `SELECT * FROM matches 
-                WHERE match_id = $1`,
+                WHERE match_id = $1;`,
         [matchId]
       );
       return result.rows[0] || null;
@@ -234,6 +233,7 @@ ${this.getMatchStatus(match.status)}
         ],
       ],
     };
+    return { message, keyboard };
   }
 
   createBallNotificatios(match, ballData) {
@@ -286,15 +286,15 @@ ${ballData.description || ""}
     try {
       // Get user stats
       const userStats = await db.query(
-        `SLECT 
+        `SELECT 
                 u.coins,
-                COUNT(p.prediction_id) as total_pridictions,
+                COUNT(p.prediction_id) as total_predictions,
                 SUM(CASE WHEN p.is_winner THEN 1 ELSE 0 END) as wins,
                 SUM(p.coins_won) as total_won,
-                u.last_active,
+                u.last_active
             FROM users u LEFT JOIN predictions p ON u.user_id = p.user_id
             WHERE u.user_id = $1
-            GROUP BY u.user_id
+            GROUP BY u.user_id;
             `,
         [userId]
       );
@@ -321,7 +321,6 @@ ${ballData.description || ""}
       );
 
       const match = activeMatch.rows[0];
-
       let message = `*👤 PRIVATE DASHBOARD*
       
 💰 *COINS:* ${stats.coins}
